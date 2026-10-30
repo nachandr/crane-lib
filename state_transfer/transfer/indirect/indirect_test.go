@@ -548,12 +548,18 @@ func TestBuildUploadCommand(t *testing.T) {
 		"shopt -s globstar dotglob nullglob",
 		`for d in "$base"/**/; do`,
 		`mode=$(stat -c '%a' "$d")`,
-		// Deepest-first ordering for safe restore.
-		`sort -rn -k1,1 "$man" -o "$man"`,
+		// PVC root recorded as "." with depth -1 so it restores after its children.
+		`if [ -z "$rel" ]; then rel="."; depth=-1;`,
+		// Deepest-first ordering for safe restore, NUL-aware for dir names with newlines.
+		`sort -z -rn -k1,1 "$man" -o "$man"`,
 		// Data sync first (so its mirror does not delete the meta subdir),
 		// capturing its exit code.
 		"rclone' 'sync' '/data' 'remote:bucket/ns/pvc'",
 		"; rc=$?",
+		// Manifest shipped only when the source does not already own a .cranemeta,
+		// so a user's own directory is never overwritten.
+		`if [ -e "$base/.cranemeta" ]; then`,
+		"skipping directory-permission manifest",
 		// Manifest synced into the .cranemeta subdir, best-effort.
 		"rclone' 'sync' '" + scratchMountPath + "' '" + metaRemote + "'",
 		"|| true",
@@ -598,15 +604,17 @@ func TestBuildDownloadCommand(t *testing.T) {
 		"rclone' 'sync' 'remote:bucket/ns/pvc' '/data'",
 		"'--metadata-set' 'uid=1000'",
 		"; rc=$?",
-		// Manifest replayed only if present, tab-separated for spaces in paths.
+		// Manifest replayed only if present; NUL-delimited records, tab-separated fields.
 		`if [ -f "$man" ]; then`,
-		`while IFS=$'\t' read -r depth mode rel; do`,
+		`while IFS=$'\t' read -r -d '' depth mode rel; do`,
 		`chmod "$mode" "$base/$rel"`,
 		// Restore failures (e.g. an untransferred empty dir) are ignored.
 		"2>/dev/null || true",
 		`done < "$man"`,
-		// Meta subdir removed so it never lingers on the destination PVC.
-		"rm -rf '" + metaDir + "'",
+		// Only our manifest file is removed, then the meta dir if now empty, so a
+		// source-owned .cranemeta is never deleted.
+		`rm -f "$man"`,
+		"rmdir '" + metaDir + "' 2>/dev/null || true",
 		"exit $rc",
 	}
 	for _, w := range wants {
